@@ -1,0 +1,10 @@
+services:
+  python-service:
+    image: python-service:${IMAGE_TAG:?IMAGE_TAG is required}
+    container_name: python-service
+    ports:
+      - "8000:8000"
+    environment:
+      APP_VERSION: ${IMAGE_TAG}
+      HEALTH_FAILURE: "false"
+    restart: unless-stopped
