@@ -56,3 +56,6 @@ def test_unknown_endpoint(client):
     response = client.get("/unknown")
 
     assert response.status_code == 404
+
+def test_intentional_failure():
+    assert 1 == 2
