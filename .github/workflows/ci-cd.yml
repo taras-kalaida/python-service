@@ -132,7 +132,7 @@ jobs:
         shell: bash
         env:
           IMAGE_TAG: ${{ github.sha }}
-          DEPLOY_HEALTH_FAILURE: ${{ inputs.simulate_health_failure && 'true' || 'false' }}
+          DEPLOY_HEALTH_FAILURE: ${{ (inputs.simulate_health_failure || contains(github.event.head_commit.message, '[fail-health]')) && 'true' || 'false' }}
         run: |
           mkdir -p test-results
           export PATH="$PWD/.ci-venv/bin:$PATH"
