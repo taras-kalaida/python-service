@@ -6,5 +6,5 @@ services:
       - "8000:8000"
     environment:
       APP_VERSION: ${IMAGE_TAG}
-      HEALTH_FAILURE: "false"
+      HEALTH_FAILURE: ${HEALTH_FAILURE:-false}
     restart: unless-stopped

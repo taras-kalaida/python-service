@@ -3,6 +3,8 @@
 set -Eeuo pipefail
 
 IMAGE_TAG="${IMAGE_TAG:?IMAGE_TAG is required}"
+HEALTH_FAILURE="${DEPLOY_HEALTH_FAILURE:-false}"
+
 IMAGE_NAME="python-service:${IMAGE_TAG}"
 CONTAINER_NAME="python-service"
 COMPOSE_FILE="compose.deploy.yaml"
@@ -17,65 +19,90 @@ if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
         "$CONTAINER_NAME")
 fi
 
+check_health() {
+    for attempt in $(seq 1 20); do
+        if curl --fail --silent --show-error \
+            --max-time 5 \
+            http://127.0.0.1:8000/health \
+            > /dev/null; then
+            return 0
+        fi
+
+        sleep 2
+    done
+
+    return 1
+}
+
 rollback() {
+    trap - ERR
+    set +e
+
     echo "Deployment failed!"
 
     docker logs "$CONTAINER_NAME" \
-        > test-results/container.log 2>&1 || true
+        > test-results/failed-container.log 2>&1
 
-    if [ -n "$PREVIOUS_IMAGE" ]; then
-        echo "Rolling back to $PREVIOUS_IMAGE"
+    if [ -z "$PREVIOUS_IMAGE" ]; then
+        echo "No previous image available"
 
-        export IMAGE_TAG="${PREVIOUS_IMAGE##*:}"
+        docker compose -f "$COMPOSE_FILE" down \
+            > test-results/cleanup.log 2>&1
 
-        docker compose -f "$COMPOSE_FILE" \
-            up -d --force-recreate --no-build
-
-        for attempt in $(seq 1 20); do
-            if curl -fsS --max-time 5 \
-                http://localhost:8000/health; then
-                echo "Rollback successful"
-                return
-            fi
-
-            sleep 2
-        done
-
-        echo "Rollback health check failed"
-    else
-        echo "No previous image available for rollback"
+        exit 1
     fi
+
+    echo "Rolling back to $PREVIOUS_IMAGE"
+
+    if [[ "$PREVIOUS_IMAGE" != python-service:* ]]; then
+        echo "Unsupported previous image: $PREVIOUS_IMAGE"
+        exit 1
+    fi
+
+    export IMAGE_TAG="${PREVIOUS_IMAGE#python-service:}"
+    export HEALTH_FAILURE=false
+
+    if ! docker compose -f "$COMPOSE_FILE" \
+        up -d --force-recreate --no-build \
+        > test-results/rollback.log 2>&1; then
+
+        echo "Rollback failed"
+        exit 1
+    fi
+
+    if check_health; then
+        echo "Rollback successful"
+        echo "Restored image: $PREVIOUS_IMAGE"
+    else
+        echo "Rollback health check failed"
+    fi
+
+    docker logs "$CONTAINER_NAME" \
+        > test-results/rollback-container.log 2>&1
+
+    exit 1
 }
 
 trap rollback ERR
 
 echo "Deploying $IMAGE_NAME"
 
-docker image inspect "$IMAGE_NAME" >/dev/null
+docker image inspect "$IMAGE_NAME" > /dev/null
+
+export IMAGE_TAG
+export HEALTH_FAILURE
 
 docker compose -f "$COMPOSE_FILE" \
     up -d --force-recreate --no-build
 
-echo "Waiting for service readiness"
+echo "Checking service readiness"
 
-READY=false
-
-for attempt in $(seq 1 20); do
-    if curl -fsS --max-time 5 \
-        http://localhost:8000/health; then
-        READY=true
-        break
-    fi
-
-    sleep 2
-done
-
-if [ "$READY" != "true" ]; then
-    echo "Service health check failed"
+if ! check_health; then
+    echo "Health check failed"
     false
 fi
 
-echo "Running infrastructure tests"
+echo "Running Testinfra"
 
 python -m pytest \
     tests/test_infrastructure_linux.py \

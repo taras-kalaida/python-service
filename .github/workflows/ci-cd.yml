@@ -4,9 +4,24 @@ on:
   push:
     branches:
       - main
+
   pull_request:
     branches:
       - main
+
+  workflow_dispatch:
+    inputs:
+      simulate_health_failure:
+        description: "Simulate failed health check"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-service-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -21,11 +36,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Prepare reports
+        run: mkdir -p test-results
 
-      - name: Run pytest
-        run: python -m pytest tests/test_app.py -v
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run API tests
+        run: |
+          python -m pytest tests/test_app.py -v \
+            --junitxml=test-results/api.xml
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-test-results
+          path: test-results/
+          if-no-files-found: warn
 
   build:
     runs-on: ubuntu-latest
@@ -35,5 +63,93 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Prepare reports
+        run: mkdir -p test-results
+
       - name: Build Docker image
-        run: docker build -t python-service:${{ github.sha }} .
+        shell: bash
+        run: |
+          docker build \
+            -t python-service:${{ github.sha }} . \
+            2>&1 | tee test-results/build.log
+
+      - name: Save Docker image
+        if: success() && github.ref == 'refs/heads/main'
+        run: |
+          docker save \
+            -o python-service-image.tar \
+            python-service:${{ github.sha }}
+
+      - name: Upload Docker image
+        if: success() && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-service-image
+          path: python-service-image.tar
+          retention-days: 7
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-build-logs
+          path: test-results/
+          if-no-files-found: warn
+
+  deploy:
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+
+    needs: build
+
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request'
+
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download verified Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: python-service-image
+          path: .artifacts
+
+      - name: Load Docker image
+        run: docker load -i .artifacts/python-service-image.tar
+
+      - name: Prepare Python environment
+        run: |
+          python3 -m venv .ci-venv
+          .ci-venv/bin/python -m pip install -r requirements.txt
+
+      - name: Deploy and verify
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          DEPLOY_HEALTH_FAILURE: ${{ inputs.simulate_health_failure && 'true' || 'false' }}
+        run: |
+          mkdir -p test-results
+          export PATH="$PWD/.ci-venv/bin:$PATH"
+          bash scripts/deploy.sh 2>&1 | tee test-results/deploy.log
+
+      - name: Collect container logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p test-results
+          docker logs python-service \
+            > test-results/final-container.log 2>&1 || true
+
+      - name: Upload deployment reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-results
+          path: test-results/
+          if-no-files-found: warn
